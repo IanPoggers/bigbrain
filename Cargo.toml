@@ -10,3 +10,4 @@ edition = "2018"
 anyhow = "1.0.38"
 itertools = "0.10.0"
 petgraph = "0.5.1"
+rand = { version = "0.8.3", features = ["small_rng"] }
