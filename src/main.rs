@@ -1,4 +1,4 @@
-use font8x8::{FontUnicode, BASIC_UNICODE};
+use font8x8::BASIC_UNICODE;
 use itertools::Itertools;
 use petgraph::{graph::NodeIndex, stable_graph::StableGraph, EdgeDirection::Incoming};
 use rand::{
@@ -7,7 +7,6 @@ use rand::{
     Rng, SeedableRng,
 };
 use rand_xorshift::XorShiftRng;
-use std::{cmp::Ordering, fs, vec::Vec};
 
 type UsedRng = XorShiftRng;
 
@@ -68,10 +67,10 @@ impl MutateParam {
     fn default() -> MutateParam {
         MutateParam {
             act_fns: vec![(|x| x / (1.0 + x.abs()), 1.0)],
-            node_insertion_prop: Uniform::new(0.0, 0.16),
-            conn_insertion_prop: Uniform::new(0.0, 0.16),
-            node_removal_prop: Uniform::new(0.0, 0.12),
-            conn_removal_prob: Uniform::new(0.0, 0.12),
+            node_insertion_prop: Uniform::new(0.0, 0.06),
+            conn_insertion_prop: Uniform::new(0.0, 0.06),
+            node_removal_prop: Uniform::new(0.0, 0.04),
+            conn_removal_prob: Uniform::new(0.0, 0.04),
             new_conn_stregnth: Uniform::new(-10.0, 10.0),
             new_node_size: Uniform::new(0, 20),
         }
@@ -277,22 +276,26 @@ impl Brain {
     }
 }
 
-struct Alg {
-    fitness_fn: fn(net_outs: &[f32], given_ins: &[f32]) -> f32, // user-defined function that determines fitness
+struct Alg<F> {
+    fitness_fn: fn(net_outs: &[f32], given_ins: &[f32], net: &Brain, extra_data: &F) -> f32, // user-defined function that determines fitness
     nets: Vec<(Brain, f32)>,
 }
 
-impl Alg {
-    fn new(nets: Vec<Brain>, fitness_fn: fn(net_outs: &[f32], given_ins: &[f32]) -> f32) -> Alg {
+impl<F> Alg<F> {
+    fn new(
+        nets: Vec<Brain>,
+        fitness_fn: fn(net_outs: &[f32], given_ins: &[f32], net: &Brain, extra_data: &F) -> f32,
+    ) -> Alg<F> {
         let nets = nets.into_iter().map(|net| (net, 0.0)).collect_vec();
         Alg { nets, fitness_fn }
     }
 
-    fn run(&mut self, ins: &[f32]) {
+    fn run(&mut self, ins: &[f32], fitness_data: &F) {
         let fitness_fn = self.fitness_fn;
         let nets = &mut self.nets;
+        let data = fitness_data;
         for (net, fitness) in nets.iter_mut() {
-            *fitness += fitness_fn(&net.run(&ins), ins).abs();
+            *fitness += fitness_fn(&net.run(&ins), ins, net, data).abs();
         }
     }
 
@@ -313,7 +316,7 @@ impl Alg {
             .split_at(nets.len() / 4)
             .0
             .iter()
-            .map(|(net, a)| *net)
+            .map(|(net, _)| *net)
             .collect_vec();
 
         let weighted_prob =
@@ -333,25 +336,26 @@ impl Alg {
     }
 }
 
+static input_chars: usize = 1;
+
 fn main() {
     let font = BASIC_UNICODE;
     let possible_chars = ('a'..='z').chain('A'..='Z').collect_vec();
 
     let mut rng = UsedRng::from_entropy();
-    let mut param = RandNetParam::default(64, 2);
+    let mut param = RandNetParam::default(8*8*input_chars, 2);
     let mutparam = MutateParam::default();
     param.size = Uniform::new(20, 50);
     let mut brains = Vec::new();
     for _ in 0..100 {
         brains.push(Brain::rand_net(&param, &mut rng))
     }
-    let mut alg = Alg::new(brains, |net_outs, _| net_outs[0] - 1.0);
     let dist = Uniform::new(-10.0, 10.0);
 
     let get_char = |c: char| {
-        BASIC_UNICODE[c as usize]
+        font[c as usize]
             .byte_array()
-            .into_iter()
+            .iter()
             .map(|&line| {
                 let mut o = [false; 8];
                 for i in 0..8 {
@@ -363,18 +367,38 @@ fn main() {
             .collect_vec()
     };
 
-    let mut ins_gen =
-        Uniform::from(0..possible_chars.len()).sample_iter(XorShiftRng::from_entropy());
-    let mut get_ins = |n| {
-        (0..n)
-            .map(|_| get_char(possible_chars[ins_gen.next().unwrap()]))
-            .flatten()
-            .collect_vec()
-    };
+    let mut alg = Alg::<Vec<char>>::new(brains, |net_outs, given_ins, brain: &Brain, chars| -> f32 {
+        net_outs
+            .iter()
+            .zip(chars)
+            .map(|(&out, &exp)| (out - exp as i32 as f32).abs())
+            .sum::<f32>() + ((brain.net.node_count() + brain.net.edge_count()) as f32 * 0.02) 
+    });
 
-    for _ in 0..100 {
-        let ins = get_ins(param.inputs / 64);
+    let ins_gen =
+        Uniform::from(0..possible_chars.len());
+
+    for i in 0.. {
+        let chars = ins_gen
+            .sample_iter(&mut rng).take(input_chars)
+            .map(|i| possible_chars[i])
+            .collect_vec();
+        let ins = chars
+            .iter()
+            .map(|&c| 
+                font[c as usize].byte_array().iter()
+                    .map(|&byte| (0..8).map(move |i| if byte as i32 | (1 << i) != 0 { 1.0 } else { -1.0 }))
+                    .flatten()
+                    .collect_vec()
+            )
+            .flatten()
+            .collect_vec();
+        for _ in 0..10 {
+            alg.run(&ins, &chars);
+        }
         alg.repopulate(&mutparam, &mut rng);
+        println!("{}", alg.nets[alg.nets.len() / 2].1);
+        alg.zero();
         //println!("{}", alg.nets.first().unwrap().1);
         alg.nets.iter_mut().for_each(|(x, _)| {
             x.clear();
