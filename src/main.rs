@@ -1,4 +1,3 @@
-
 use font8x8::BASIC_UNICODE;
 use itertools::*;
 use petgraph::{graph::NodeIndex, stable_graph::StableGraph, EdgeDirection::Incoming};
@@ -9,10 +8,7 @@ use rand::{
 };
 use rand_xorshift::XorShiftRng;
 use rayon::iter::ParallelIterator;
-use rayon::{
-    iter::*,
-    prelude::*
-};
+use rayon::{iter::*, prelude::*};
 
 type UsedRng = XorShiftRng;
 
@@ -112,26 +108,18 @@ impl Brain {
         }
 
         hidden_nodes
-            .iter()
-            .chain(output_nodes.iter())
-            .collect_vec()
-            .par_chunks((hidden_nodes.len() + output_nodes.len()) / 12)
-            .map(|chunk| {
-                chunk
-                    .iter()
-                    .map(|&&node| {
-                        let mut neighbors = net.neighbors_directed(node, Incoming).detach();
+            .par_iter()
+            .chain(output_nodes.par_iter())
+            .map(|&node| {
+                let mut neighbors = net.neighbors_directed(node, Incoming).detach();
 
-                        let mut node_input = 0f32;
-                        while let Some((edge, connected_node)) = neighbors.next(net) {
-                            node_input += net[connected_node].out * net[edge];
-                        }
+                let mut node_input = 0f32;
+                while let Some((edge, connected_node)) = neighbors.next(net) {
+                    node_input += net[connected_node].out * net[edge];
+                }
 
-                        (node, (net[node].activation_fn)(node_input))
-                    })
-                    .collect_vec()
+                (node, (net[node].activation_fn)(node_input))
             })
-            .flatten()
             .collect::<Vec<_>>()
             .iter()
             .for_each(|(node, buffered_out)| net[*node].out = *buffered_out);
@@ -383,15 +371,17 @@ fn main() {
             .collect_vec()
     };
 
-    let mut alg =
-        Alg::<Vec<char>>::new(brains, |net_outs, _given_ins, brain: &Brain, chars| -> f32 {
+    let mut alg = Alg::<Vec<char>>::new(
+        brains,
+        |net_outs, _given_ins, brain: &Brain, chars| -> f32 {
             net_outs
                 .iter()
                 .zip(chars)
                 .map(|(&out, &exp)| (out - exp as i32 as f32).abs())
                 .sum::<f32>()
                 + ((brain.net.node_count() + brain.net.edge_count()) as f32 * 0.02)
-        });
+        },
+    );
 
     let ins_gen = Uniform::from(0..possible_chars.len());
 
