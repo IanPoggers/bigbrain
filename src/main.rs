@@ -1,5 +1,6 @@
+
 use font8x8::BASIC_UNICODE;
-use itertools::Itertools;
+use itertools::*;
 use petgraph::{graph::NodeIndex, stable_graph::StableGraph, EdgeDirection::Incoming};
 use rand::{
     distributions::{Uniform, WeightedIndex},
@@ -7,6 +8,11 @@ use rand::{
     Rng, SeedableRng,
 };
 use rand_xorshift::XorShiftRng;
+use rayon::iter::ParallelIterator;
+use rayon::{
+    iter::*,
+    prelude::*
+};
 
 type UsedRng = XorShiftRng;
 
@@ -98,25 +104,35 @@ impl Brain {
         );
         let net = &mut self.net;
         let input_nodes = net.externals(Incoming).collect_vec();
+        let hidden_nodes = &mut self.hidden_nodes;
+        let output_nodes = &mut self.output_nodes;
 
         for (inode, input) in input_nodes.iter().zip(ins) {
             net[*inode].out = *input;
         }
 
-        self.hidden_nodes
+        hidden_nodes
             .iter()
-            .chain(self.output_nodes.iter())
-            .map(|&node| -> (NodeIndex, f32) {
-                let mut neighbors = net.neighbors_directed(node, Incoming).detach();
-
-                let mut node_input = 0f32;
-                while let Some((edge, connected_node)) = neighbors.next(net) {
-                    node_input += net[connected_node].out * net[edge];
-                }
-
-                (node, (net[node].activation_fn)(node_input))
-            })
+            .chain(output_nodes.iter())
             .collect_vec()
+            .par_chunks((hidden_nodes.len() + output_nodes.len()) / 12)
+            .map(|chunk| {
+                chunk
+                    .iter()
+                    .map(|&&node| {
+                        let mut neighbors = net.neighbors_directed(node, Incoming).detach();
+
+                        let mut node_input = 0f32;
+                        while let Some((edge, connected_node)) = neighbors.next(net) {
+                            node_input += net[connected_node].out * net[edge];
+                        }
+
+                        (node, (net[node].activation_fn)(node_input))
+                    })
+                    .collect_vec()
+            })
+            .flatten()
+            .collect::<Vec<_>>()
             .iter()
             .for_each(|(node, buffered_out)| net[*node].out = *buffered_out);
 
@@ -287,7 +303,7 @@ impl<F> Alg<F> {
         fitness_fn: fn(net_outs: &[f32], given_ins: &[f32], net: &Brain, extra_data: &F) -> f32,
     ) -> Alg<F> {
         let nets = nets.into_iter().map(|net| (net, 0.0)).collect_vec();
-        Alg { nets, fitness_fn }
+        Alg { fitness_fn, nets }
     }
 
     fn run(&mut self, ins: &[f32], fitness_data: &F) {
@@ -343,16 +359,16 @@ fn main() {
     let possible_chars = ('a'..='z').chain('A'..='Z').collect_vec();
 
     let mut rng = UsedRng::from_entropy();
-    let mut param = RandNetParam::default(8*8*input_chars, 2);
+    let mut param = RandNetParam::default(8 * 8 * input_chars, 2);
     let mutparam = MutateParam::default();
     param.size = Uniform::new(20, 50);
     let mut brains = Vec::new();
     for _ in 0..100 {
         brains.push(Brain::rand_net(&param, &mut rng))
     }
-    let dist = Uniform::new(-10.0, 10.0);
+    let _dist = Uniform::new(-10.0, 10.0);
 
-    let get_char = |c: char| {
+    let _get_char = |c: char| {
         font[c as usize]
             .byte_array()
             .iter()
@@ -367,30 +383,42 @@ fn main() {
             .collect_vec()
     };
 
-    let mut alg = Alg::<Vec<char>>::new(brains, |net_outs, given_ins, brain: &Brain, chars| -> f32 {
-        net_outs
-            .iter()
-            .zip(chars)
-            .map(|(&out, &exp)| (out - exp as i32 as f32).abs())
-            .sum::<f32>() + ((brain.net.node_count() + brain.net.edge_count()) as f32 * 0.02) 
-    });
+    let mut alg =
+        Alg::<Vec<char>>::new(brains, |net_outs, _given_ins, brain: &Brain, chars| -> f32 {
+            net_outs
+                .iter()
+                .zip(chars)
+                .map(|(&out, &exp)| (out - exp as i32 as f32).abs())
+                .sum::<f32>()
+                + ((brain.net.node_count() + brain.net.edge_count()) as f32 * 0.02)
+        });
 
-    let ins_gen =
-        Uniform::from(0..possible_chars.len());
+    let ins_gen = Uniform::from(0..possible_chars.len());
 
-    for i in 0.. {
+    for _i in 0.. {
         let chars = ins_gen
-            .sample_iter(&mut rng).take(input_chars)
+            .sample_iter(&mut rng)
+            .take(input_chars)
             .map(|i| possible_chars[i])
             .collect_vec();
         let ins = chars
             .iter()
-            .map(|&c| 
-                font[c as usize].byte_array().iter()
-                    .map(|&byte| (0..8).map(move |i| if byte as i32 | (1 << i) != 0 { 1.0 } else { -1.0 }))
+            .map(|&c| {
+                font[c as usize]
+                    .byte_array()
+                    .iter()
+                    .map(|&byte| {
+                        (0..8).map(move |i| {
+                            if byte as i32 | (1 << i) != 0 {
+                                1.0
+                            } else {
+                                -1.0
+                            }
+                        })
+                    })
                     .flatten()
                     .collect_vec()
-            )
+            })
             .flatten()
             .collect_vec();
         for _ in 0..10 {
